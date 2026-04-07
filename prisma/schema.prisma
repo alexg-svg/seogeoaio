@@ -1,0 +1,251 @@
+// ============================================================
+// Prisma Schema — SEO Audit App MVP
+// ============================================================
+// Design notes:
+//   - No User/Project models in MVP. Audits are standalone, accessed by ID.
+//   - JSON columns (headingsJson, structuredDataJson, etc.) store raw parsed
+//     extracts so rule implementations can evolve without schema migrations.
+//   - Issue.fingerprint enables idempotent re-runs and future diff comparisons.
+//   - Recommendation records are one-per-rule-per-audit (not one per issue),
+//     with affectedPageCount aggregated so the UI shows blast radius at a glance.
+//   - PageCategoryScore and CategoryScore are computed and stored at write time
+//     so the dashboard read path is a single JOIN, not a runtime aggregation.
+// ============================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Enums ───────────────────────────────────────────────────
+
+enum AuditStatus {
+  PENDING    // created, not yet started
+  CRAWLING   // fetching pages
+  ANALYZING  // running rules, scoring, building recommendations
+  COMPLETE   // all done
+  FAILED     // unrecoverable error
+}
+
+enum AuditInputType {
+  HOMEPAGE // single URL; crawler discovers internal links up to page cap
+  SITEMAP  // sitemap or sitemap index URL; URLs are collected from XML
+}
+
+enum IssueSeverity {
+  CRITICAL // blocks indexing or invalidates entire category
+  HIGH     // significant ranking signal absent or broken
+  MEDIUM   // noticeable gap, fix when prioritising
+  LOW      // minor improvement available
+  INFO     // informational, no score impact
+}
+
+enum IssueCategory {
+  TECHNICAL_SEO
+  ON_PAGE_SEO
+  LOCAL_SEO
+  STRUCTURED_DATA
+  AEO             // Answer Engine / LLM Optimisation
+  CONTENT         // Content quality and cannibalization
+}
+
+enum IssueScope {
+  PAGE     // evaluated per crawled page
+  SITEWIDE // evaluated across all pages together (e.g. duplicate titles)
+}
+
+// ─── Models ──────────────────────────────────────────────────
+
+/// Top-level audit job. Created when the user submits a URL.
+model Audit {
+  id           String         @id @default(cuid())
+  inputUrl     String         // the URL the user submitted (homepage or sitemap)
+  inputType    AuditInputType
+  status       AuditStatus    @default(PENDING)
+  startedAt    DateTime       @default(now())
+  completedAt  DateTime?
+  errorMessage String?        // set when status = FAILED
+
+  // Crawl summary stats (populated progressively, finalised on COMPLETE)
+  pagesCrawled   Int @default(0)
+  pagesSkipped   Int @default(0) // e.g. noindex, non-200, robots-blocked
+  crawlDurationMs Int?
+
+  // Top-level score (0–100). Weighted average of CategoryScore.score values.
+  overallScore Float?
+
+  // Relations
+  pages           AuditedPage[]
+  categoryScores  CategoryScore[]
+  recommendations Recommendation[]
+
+  @@index([status])
+  @@index([startedAt])
+}
+
+/// One crawled page within an audit. Each page gets its own set of Issues
+/// and PageCategoryScores. Canonical and redirect data inform cannibalization rules.
+model AuditedPage {
+  id             String    @id @default(cuid())
+  auditId        String
+  url            String    // final URL after redirect resolution
+  originalUrl    String?   // URL as discovered (before redirect)
+  canonicalUrl   String?   // value of <link rel="canonical" href="...">
+  statusCode     Int       // HTTP status of final response
+  redirectUrl    String?   // first redirect target if 3xx
+  redirectChainLength Int  @default(0) // 0 = no redirect
+  fetchDurationMs Int?
+  fetchedAt      DateTime  @default(now())
+
+  // Indexability signals
+  isIndexable    Boolean @default(true)  // false if noindex or robots-blocked
+  robotsBlocked  Boolean @default(false)
+  hasCanonicalMismatch Boolean @default(false) // canonical ≠ url
+
+  // Parsed content signals (flat columns for fast queries)
+  title            String?
+  metaDescription  String?
+  h1               String?   // first H1 only (full list in headingsJson)
+  h1Count          Int       @default(0)
+  wordCount        Int?
+  internalLinkCount Int?
+  externalLinkCount Int?
+  imageCount       Int?
+  imagesWithoutAlt  Int?
+
+  // Page-level score (0–100). Weighted average of PageCategoryScore values,
+  // sitewide rules excluded (those only affect CategoryScore at the audit level).
+  pageScore Float?
+
+  // Raw JSON extracts — stored so rules can evolve without schema migrations.
+  headingsJson      Json? // { h1: string[], h2: string[], h3: string[] }
+  metaTagsJson      Json? // Record<string, string> (name/property → content)
+  structuredDataJson Json? // array of parsed JSON-LD objects
+  openGraphJson     Json? // Record<string, string>
+  twitterCardJson   Json? // Record<string, string>
+  internalLinksJson Json? // string[] of discovered internal hrefs (normalised)
+
+  // Relations
+  audit          Audit               @relation(fields: [auditId], references: [id], onDelete: Cascade)
+  issues         Issue[]
+  categoryScores PageCategoryScore[]
+
+  @@unique([auditId, url])
+  @@index([auditId])
+  @@index([auditId, pageScore])
+  @@index([auditId, isIndexable])
+}
+
+/// A single rule failure instance. One Issue row per (rule, page) combination.
+/// Sitewide issues have pageId = null.
+/// The fingerprint field is a SHA-256 hash of (auditId + ruleId + url-or-"sitewide")
+/// enabling idempotent upserts and future audit-diff comparisons.
+model Issue {
+  id       String        @id @default(cuid())
+  auditId  String        // denormalised for fast dashboard queries without JOIN
+  pageId   String?       // null ⟹ sitewide issue
+
+  ruleId   String        // e.g. "TECH_013"
+  ruleName String        // human label e.g. "Duplicate Title Tags"
+  category IssueCategory
+  severity IssueSeverity
+  scope    IssueScope
+
+  // What the rule found, in plain language specific to this page.
+  // e.g. "Title tag is 85 characters (limit: 60)"
+  detail   String
+
+  // The actual data that triggered the failure. Stored as JSON so each rule
+  // can include whatever evidence is most useful (title value, list of URLs, etc.)
+  evidence Json?
+
+  // Score deduction applied to the relevant category score for this page
+  // (or the site-level category score for sitewide issues).
+  scoreImpact Float
+
+  // Idempotency / diffing key
+  fingerprint String @unique
+
+  // Linking back to the recommendation template for this rule
+  recommendationId String?
+
+  // Relations
+  page           AuditedPage?   @relation(fields: [pageId], references: [id], onDelete: Cascade)
+  recommendation Recommendation? @relation(fields: [recommendationId], references: [id])
+
+  @@index([auditId, category])
+  @@index([auditId, severity])
+  @@index([auditId, scope])
+  @@index([pageId])
+}
+
+/// One recommendation per failing rule per audit. Groups all Issue instances
+/// for a rule together so the recommendation is shown once with affected page count,
+/// not repeated per page.
+model Recommendation {
+  id      String @id @default(cuid())
+  auditId String
+  ruleId  String // links to rule definition in code
+
+  title           String
+  summary         String // 1–2 sentence plain-English description
+  whyItMatters    String // business/ranking context
+  implementationSteps Json   // string[] — ordered action steps
+  exampleFix      String?    // code snippet or example value
+
+  // Impact / Effort use HIGH | MEDIUM | LOW strings (not enums) for flexibility.
+  impact String // score + ranking impact
+  effort String // implementation effort
+
+  // Computed priority: lower number = fix first.
+  // Formula: (severityWeight × 3) + (impactWeight × 2) + (1 / effortWeight)
+  // Tie-break: affectedPageCount DESC.
+  priority Int
+
+  // Aggregated from linked Issues
+  affectedPageCount Int   @default(0)
+  totalScoreImpact  Float @default(0)
+
+  // Relations
+  audit  Audit   @relation(fields: [auditId], references: [id], onDelete: Cascade)
+  issues Issue[]
+
+  @@unique([auditId, ruleId])
+  @@index([auditId, priority])
+}
+
+/// Site-level category score. Computed once per category per audit.
+/// score = 100 minus sum of scoreImpact from all issues in this category,
+/// then adjusted by the category's weight in the overall score.
+model CategoryScore {
+  id         String        @id @default(cuid())
+  auditId    String
+  category   IssueCategory
+  score      Float          // 0–100
+  maxScore   Float          @default(100)
+  issueCount Int
+
+  audit Audit @relation(fields: [auditId], references: [id], onDelete: Cascade)
+
+  @@unique([auditId, category])
+  @@index([auditId])
+}
+
+/// Per-page per-category score. Excludes sitewide rules.
+/// Used in the per-page drill-down view to show where a specific page loses points.
+model PageCategoryScore {
+  id       String        @id @default(cuid())
+  pageId   String
+  category IssueCategory
+  score    Float
+  maxScore Float @default(100)
+
+  page AuditedPage @relation(fields: [pageId], references: [id], onDelete: Cascade)
+
+  @@unique([pageId, category])
+  @@index([pageId])
+}
