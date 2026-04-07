@@ -1,124 +1,68 @@
-"use client";
+import { BarChart3, CheckCircle2, Globe, Zap } from "lucide-react";
+import { UrlSubmitForm } from "@/components/url-submit-form";
 
-import { useState } from "react";
-
-interface AuditResult {
-  auditId: string;
-  projectId: string;
-  status: string;
-  inputUrl: string;
-  inputType: string;
-  discoveredUrlCount: number;
-}
+const FEATURES = [
+  {
+    icon: <BarChart3 className="h-5 w-5" />,
+    title: "Comprehensive scoring",
+    desc: "Six categories: Technical, On-Page, Local, Schema, AEO, and Content.",
+  },
+  {
+    icon: <CheckCircle2 className="h-5 w-5" />,
+    title: "Actionable recommendations",
+    desc: "Step-by-step fixes with effort and impact ratings so you know what to do first.",
+  },
+  {
+    icon: <Zap className="h-5 w-5" />,
+    title: "Quick wins",
+    desc: "Instantly surfaces high-impact, low-effort improvements.",
+  },
+  {
+    icon: <Globe className="h-5 w-5" />,
+    title: "Local SEO & AEO",
+    desc: "Checks NAP signals, LocalBusiness schema, question headings, and direct-answer patterns.",
+  },
+];
 
 export default function HomePage() {
-  const [url, setUrl] = useState("");
-  const [inputType, setInputType] = useState<"" | "HOMEPAGE" | "SITEMAP">("");
-  const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<AuditResult | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    setLoading(true);
-    setError(null);
-    setResult(null);
-
-    try {
-      const res = await fetch("/api/audits", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          url,
-          ...(inputType ? { inputType } : {}),
-        }),
-      });
-
-      const data = await res.json();
-      if (!res.ok) {
-        setError(data.error ?? "Request failed");
-        return;
-      }
-      setResult(data as AuditResult);
-    } catch {
-      setError("Network error — is the dev server running?");
-    } finally {
-      setLoading(false);
-    }
-  }
-
   return (
-    <main className="mx-auto max-w-lg p-8">
-      <h1 className="text-2xl font-bold mb-6">SEO Audit — Pass 2A test</h1>
-
-      <form onSubmit={handleSubmit} className="space-y-4">
-        <div>
-          <label className="block text-sm font-medium mb-1">
-            URL to audit
-          </label>
-          <input
-            type="url"
-            required
-            value={url}
-            onChange={(e) => setUrl(e.target.value)}
-            placeholder="https://example.com or https://example.com/sitemap.xml"
-            className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
-          />
+    <div className="min-h-screen bg-gradient-to-b from-background to-secondary/30">
+      <header className="border-b bg-background/80 backdrop-blur sticky top-0 z-10">
+        <div className="mx-auto max-w-5xl px-4 h-14 flex items-center gap-2">
+          <BarChart3 className="h-5 w-5 text-primary" />
+          <span className="font-bold tracking-tight">SEO Audit</span>
         </div>
+      </header>
 
-        <div>
-          <label className="block text-sm font-medium mb-1">
-            Input type <span className="text-gray-400">(leave blank to auto-detect)</span>
-          </label>
-          <select
-            value={inputType}
-            onChange={(e) =>
-              setInputType(e.target.value as "" | "HOMEPAGE" | "SITEMAP")
-            }
-            className="w-full border border-gray-300 rounded px-3 py-2 text-sm bg-white"
-          >
-            <option value="">Auto-detect</option>
-            <option value="HOMEPAGE">Homepage / page URL</option>
-            <option value="SITEMAP">Sitemap URL</option>
-          </select>
-        </div>
-
-        <button
-          type="submit"
-          disabled={loading}
-          className="w-full bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white font-medium rounded px-4 py-2 text-sm"
-        >
-          {loading ? "Creating audit…" : "Start audit"}
-        </button>
-      </form>
-
-      {error && (
-        <div className="mt-6 p-4 bg-red-50 border border-red-200 rounded text-sm text-red-700">
-          {error}
-        </div>
-      )}
-
-      {result && (
-        <div className="mt-6 p-4 bg-green-50 border border-green-200 rounded text-sm space-y-2">
-          <p className="font-semibold text-green-800">Audit created ✓</p>
-          <table className="w-full text-xs">
-            <tbody>
-              {Object.entries(result).map(([k, v]) => (
-                <tr key={k} className="border-t border-green-100">
-                  <td className="py-1 pr-4 font-medium text-gray-600">{k}</td>
-                  <td className="py-1 font-mono">{String(v)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          <p className="text-gray-500 pt-2">
-            Poll:{" "}
-            <code className="bg-white px-1 rounded">
-              GET /api/audits/{result.auditId}?view=status
-            </code>
+      <main className="mx-auto max-w-5xl px-4 py-16 space-y-16">
+        <div className="text-center space-y-6">
+          <h1 className="text-4xl md:text-5xl font-extrabold tracking-tight">
+            Deterministic SEO audits,
+            <br className="hidden md:block" />
+            <span className="text-primary"> in seconds.</span>
+          </h1>
+          <p className="text-lg text-muted-foreground max-w-xl mx-auto">
+            Paste any URL and get a full audit covering technical SEO, on-page signals,
+            local SEO, structured data, and answer-engine readiness.
+          </p>
+          <div className="mx-auto max-w-2xl bg-background border rounded-xl shadow-sm p-6">
+            <UrlSubmitForm />
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Crawls up to 50 pages. No account required.
           </p>
         </div>
-      )}
-    </main>
+
+        <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-6">
+          {FEATURES.map((f) => (
+            <div key={f.title} className="bg-background border rounded-lg p-4 space-y-2">
+              <div className="text-primary">{f.icon}</div>
+              <h3 className="font-semibold text-sm">{f.title}</h3>
+              <p className="text-xs text-muted-foreground">{f.desc}</p>
+            </div>
+          ))}
+        </div>
+      </main>
+    </div>
   );
 }
