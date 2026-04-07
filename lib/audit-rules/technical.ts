@@ -239,6 +239,7 @@ const TECH_012: SitewideRule = sitewideRule(
     defaultSeverity: "MEDIUM",
   },
   (pages, ctx) => {
+    if (!ctx.robots) return [];
     if (!ctx.robots.accessible) {
       return [{ url: null, detail: "robots.txt returned a non-200 response. Google cannot crawl efficiently without it." }];
     }
@@ -254,6 +255,7 @@ const TECH_013: SitewideRule = sitewideRule(
     defaultSeverity: "LOW",
   },
   (pages, ctx) => {
+    if (!ctx.robots) return [];
     if (ctx.robots.accessible && !ctx.robots.hasSitemapDirective) {
       return [{ url: null, detail: "robots.txt does not include a Sitemap: directive. Add it to help search engines discover all URLs." }];
     }
