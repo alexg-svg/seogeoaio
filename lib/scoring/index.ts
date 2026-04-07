@@ -1,128 +1,138 @@
-import type { RuleResult, IssueCategory } from "@/lib/audit-rules/types";
-import { SEVERITY_SCORE_IMPACT } from "@/lib/audit-rules/utils";
+import type { RuleResult } from "@/lib/audit-rules/types";
+import type { IssueOutput } from "@/lib/audit-rules/types";
+import {
+  CATEGORY_WEIGHTS,
+  ALL_CATEGORIES,
+  type CategoryScoreDetail,
+  type PageScoreResult,
+  type SiteScoreResult,
+} from "./types";
 
-// Weights must sum to 1.0
-export const CATEGORY_WEIGHTS: Record<IssueCategory, number> = {
-  TECHNICAL_SEO: 0.30,
-  ON_PAGE_SEO: 0.25,
-  STRUCTURED_DATA: 0.15,
-  CONTENT: 0.15,
-  AEO: 0.10,
-  LOCAL_SEO: 0.05,
-};
+export { CATEGORY_WEIGHTS, ALL_CATEGORIES };
+export type { CategoryScoreDetail, PageScoreResult, SiteScoreResult };
 
-export const ALL_CATEGORIES: IssueCategory[] = [
-  "TECHNICAL_SEO",
-  "ON_PAGE_SEO",
-  "LOCAL_SEO",
-  "STRUCTURED_DATA",
-  "AEO",
-  "CONTENT",
-];
-
-export interface CategoryScoreDetail {
-  category: IssueCategory;
-  score: number;       // 0–100
-  maxScore: number;    // always 100
-  issueCount: number;
-  deduction: number;
-}
-
-export interface PageScoreResult {
-  pageScore: number;
-  categoryScores: CategoryScoreDetail[];
-}
-
-export interface SiteScoreResult {
-  overallScore: number;
-  categoryScores: CategoryScoreDetail[];
-}
+// ─── Scoring from RuleResult[] (used by tests / legacy paths) ────────────────
 
 /**
- * Compute scores for a single page from its PAGE-scoped rule results.
- * Sitewide rules are excluded — they only affect the site-level category score.
+ * Compute per-category and overall score for a single page.
+ * Accepts the full RuleResult[] (pass + fail + skip) from the rule runner.
  */
 export function computePageScore(pageResults: RuleResult[]): PageScoreResult {
-  const pageIssues = pageResults.filter(
+  const failedPageRules = pageResults.filter(
     (r) => r.scope === "PAGE" && r.status === "fail"
   );
-
-  const categoryScores: CategoryScoreDetail[] = ALL_CATEGORIES.map((cat) => {
-    const catIssues = pageIssues.filter((r) => r.category === cat);
-    // One deduction per rule (ruleId) — prevent duplicate counting if a rule
-    // somehow fires twice for the same page
-    const uniqueByRule = deduplicateByRuleId(catIssues);
-    const deduction = uniqueByRule.reduce((sum, r) => sum + r.scoreImpact, 0);
-    const score = Math.max(0, 100 - deduction);
-    return {
-      category: cat,
-      score,
-      maxScore: 100,
-      issueCount: uniqueByRule.length,
-      deduction,
-    };
-  });
-
-  const pageScore = computeWeightedScore(categoryScores);
-  return { pageScore, categoryScores };
+  return _scoreFromFailures(failedPageRules);
 }
 
 /**
- * Compute site-level scores by:
- * 1. Averaging page category scores across all indexable pages.
- * 2. Applying sitewide issue deductions on top.
+ * Compute site-level scores by averaging per-page category scores and then
+ * applying sitewide deductions on top.
+ * Accepts the full RuleResult[] (pass + fail + skip) for sitewide rules.
  */
 export function computeSiteScore(
   pageScores: PageScoreResult[],
   sitewideResults: RuleResult[]
 ): SiteScoreResult {
   const sitewideIssues = sitewideResults.filter((r) => r.status === "fail");
+  return _siteScoreFromAveragedPages(pageScores, sitewideIssues);
+}
 
+// ─── Scoring from IssueOutput[] (used by the audit runner) ───────────────────
+
+/**
+ * Compute per-category and overall score for a single page from its pre-filtered
+ * IssueOutput array (only failures, PAGE scope).
+ */
+export function computePageScoreFromIssues(
+  pageIssues: IssueOutput[]
+): PageScoreResult {
+  const filtered = pageIssues.filter((i) => i.scope === "PAGE");
+  return _scoreFromFailures(filtered);
+}
+
+/**
+ * Compute site-level scores from per-page PageScoreResult[] and the
+ * flat array of sitewide IssueOutput objects.
+ */
+export function computeSiteScoreFromIssues(
+  pageScores: PageScoreResult[],
+  sitewideIssues: IssueOutput[]
+): SiteScoreResult {
+  const filtered = sitewideIssues.filter((i) => i.scope === "SITEWIDE");
+  return _siteScoreFromAveragedPages(pageScores, filtered);
+}
+
+// ─── Internals ────────────────────────────────────────────────────────────────
+
+type Scorable = Pick<RuleResult | IssueOutput, "ruleId" | "category" | "scoreImpact">;
+
+function _scoreFromFailures(failures: Scorable[]): PageScoreResult {
   const categoryScores: CategoryScoreDetail[] = ALL_CATEGORIES.map((cat) => {
-    // Average page scores for this category (indexable pages only, represented
-    // by having a pageScore entry)
-    const catPageScores = pageScores.map(
-      (ps) => ps.categoryScores.find((c) => c.category === cat)?.score ?? 100
+    const catIssues = deduplicateByRuleId(
+      failures.filter((r) => r.category === cat)
     );
-    const avgPageScore =
-      catPageScores.length > 0
-        ? catPageScores.reduce((a, b) => a + b, 0) / catPageScores.length
+    const deduction = catIssues.reduce((sum, r) => sum + r.scoreImpact, 0);
+    return {
+      category: cat,
+      score: Math.max(0, 100 - deduction),
+      maxScore: 100,
+      issueCount: catIssues.length,
+      deduction,
+    };
+  });
+
+  return {
+    pageScore: weightedScore(categoryScores),
+    categoryScores,
+  };
+}
+
+function _siteScoreFromAveragedPages(
+  pageScores: PageScoreResult[],
+  sitewideFailures: Scorable[]
+): SiteScoreResult {
+  const categoryScores: CategoryScoreDetail[] = ALL_CATEGORIES.map((cat) => {
+    const avgPage =
+      pageScores.length > 0
+        ? pageScores
+            .map((ps) => ps.categoryScores.find((c) => c.category === cat)?.score ?? 100)
+            .reduce((a, b) => a + b, 0) / pageScores.length
         : 100;
 
-    // Apply sitewide deductions once (deduped by ruleId)
-    const catSitewideIssues = deduplicateByRuleId(
-      sitewideIssues.filter((r) => r.category === cat)
+    const catSitewide = deduplicateByRuleId(
+      sitewideFailures.filter((r) => r.category === cat)
     );
-    const sitewideDeduction = catSitewideIssues.reduce(
+    const sitewideDeduction = catSitewide.reduce(
       (sum, r) => sum + r.scoreImpact,
       0
     );
 
-    const score = Math.max(0, avgPageScore - sitewideDeduction);
     return {
       category: cat,
-      score,
+      score: Math.max(0, avgPage - sitewideDeduction),
       maxScore: 100,
-      issueCount: catSitewideIssues.length,
+      issueCount: catSitewide.length,
       deduction: sitewideDeduction,
     };
   });
 
-  const overallScore = computeWeightedScore(categoryScores);
-  return { overallScore, categoryScores };
+  return {
+    overallScore: weightedScore(categoryScores),
+    categoryScores,
+  };
 }
 
-function computeWeightedScore(scores: CategoryScoreDetail[]): number {
+function weightedScore(scores: CategoryScoreDetail[]): number {
   const total = scores.reduce(
     (sum, cs) => sum + cs.score * CATEGORY_WEIGHTS[cs.category],
     0
   );
-  return Math.round(total * 10) / 10; // round to 1 decimal
+  return Math.round(total * 10) / 10;
 }
 
-function deduplicateByRuleId(results: RuleResult[]): RuleResult[] {
+function deduplicateByRuleId<T extends { ruleId: string }>(items: T[]): T[] {
   const seen = new Set<string>();
-  return results.filter((r) => {
+  return items.filter((r) => {
     if (seen.has(r.ruleId)) return false;
     seen.add(r.ruleId);
     return true;

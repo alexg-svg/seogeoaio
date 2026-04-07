@@ -1,5 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
+import { after } from "next/server";
 import { getAuditById, getAuditStatus } from "@/lib/audit-runner/intake";
+import { runAudit } from "@/lib/audit-runner/run-audit";
+
+export const maxDuration = 300;
 
 // ─── GET /api/audits/[id] ─────────────────────────────────────────────────────
 // Query params:
@@ -32,4 +36,16 @@ export async function GET(
     console.error(`[GET /api/audits/${id}]`, err);
     return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
+}
+
+// ─── POST /api/audits/[id]/run ────────────────────────────────────────────────
+// Trigger the full audit pipeline for an existing audit.
+// Responds immediately; processing continues in after().
+export async function POST(
+  _req: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const { id } = await params;
+  after(() => runAudit(id));
+  return NextResponse.json({ auditId: id, message: "Audit pipeline started" }, { status: 202 });
 }
