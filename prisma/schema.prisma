@@ -1,0 +1,224 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Enums ────────────────────────────────────────────────────────────────────
+
+enum AuditStatus {
+  PENDING    // created; pipeline not yet started
+  CRAWLING   // fetching pages / discovering URLs
+  ANALYZING  // rules, scoring, recommendations
+  COMPLETE
+  FAILED
+}
+
+enum AuditInputType {
+  HOMEPAGE // user submitted a normal page URL; BFS link discovery is used
+  SITEMAP  // user submitted a sitemap or sitemap-index URL
+}
+
+enum IssueSeverity {
+  CRITICAL
+  HIGH
+  MEDIUM
+  LOW
+  INFO
+}
+
+enum IssueCategory {
+  TECHNICAL_SEO
+  ON_PAGE_SEO
+  LOCAL_SEO
+  STRUCTURED_DATA
+  AEO
+  CONTENT
+}
+
+// ─── Models ───────────────────────────────────────────────────────────────────
+
+// Project groups audits for the same site.
+// Created automatically on first audit submission for a given origin.
+model Project {
+  id        String   @id @default(cuid())
+  name      String   // defaults to hostname (e.g. "example.com")
+  siteUrl   String   // normalised origin, e.g. "https://example.com"
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  audits Audit[]
+
+  @@unique([siteUrl])
+  @@index([createdAt])
+}
+
+// One audit run per submission.
+model Audit {
+  id        String  @id @default(cuid())
+  projectId String? // null = standalone audit (no project context)
+
+  inputUrl  String         // the URL the user submitted
+  inputType AuditInputType
+
+  status       AuditStatus @default(PENDING)
+  startedAt    DateTime    @default(now())
+  completedAt  DateTime?
+  errorMessage String?
+
+  // Populated after initial URL discovery (2A)
+  sitemapUrl         String? // resolved sitemap URL (may differ from inputUrl)
+  discoveredUrlCount Int     @default(0) // total URLs found before the 50-page cap
+
+  // Populated after full crawl (2B+)
+  pagesCrawled    Int  @default(0)
+  pagesSkipped    Int  @default(0)
+  crawlDurationMs Int?
+
+  // Populated after scoring (2B+)
+  overallScore Float?
+
+  project         Project?        @relation(fields: [projectId], references: [id])
+  pages           AuditedPage[]
+  categoryScores  CategoryScore[]
+  recommendations Recommendation[]
+
+  @@index([projectId])
+  @@index([status])
+  @@index([startedAt])
+}
+
+// One row per crawled page within an audit.
+model AuditedPage {
+  id          String   @id @default(cuid())
+  auditId     String
+  url         String   // final URL after redirect resolution
+  originalUrl String?  // URL as discovered in sitemap / link
+  canonicalUrl String?
+  statusCode  Int
+  redirectUrl String?
+  redirectChainLength Int @default(0)
+  fetchDurationMs     Int?
+  fetchedAt           DateTime @default(now())
+
+  isIndexable          Boolean @default(true)
+  robotsBlocked        Boolean @default(false)
+  hasCanonicalMismatch Boolean @default(false)
+
+  // Flat content signals (fast to query; full extracts stored in JSON columns)
+  title             String?
+  metaDescription   String?
+  h1                String?
+  h1Count           Int @default(0)
+  wordCount         Int?
+  internalLinkCount Int?
+  externalLinkCount Int?
+  imageCount        Int?
+  imagesWithoutAlt  Int?
+
+  pageScore Float?
+
+  // Raw parser extracts — kept for rule re-evaluation without re-crawling
+  headingsJson       Json?
+  metaTagsJson       Json?
+  structuredDataJson Json?
+  openGraphJson      Json?
+  twitterCardJson    Json?
+  internalLinksJson  Json?
+
+  audit          Audit               @relation(fields: [auditId], references: [id], onDelete: Cascade)
+  issues         Issue[]
+  categoryScores PageCategoryScore[]
+
+  @@unique([auditId, url])
+  @@index([auditId])
+  @@index([auditId, pageScore])
+  @@index([auditId, isIndexable])
+}
+
+// One Issue per (rule × page) or per (rule × audit) for sitewide rules.
+// Issues are NOT linked back to Recommendations by FK — join on (auditId, ruleId).
+model Issue {
+  id      String  @id @default(cuid())
+  auditId String  // denormalised for dashboard queries without extra JOIN
+  pageId  String? // null → sitewide issue
+
+  ruleId   String
+  ruleName String
+  category IssueCategory
+  severity IssueSeverity
+  scope    String        // "PAGE" | "SITEWIDE"
+
+  detail      String
+  evidence    Json?
+  scoreImpact Float
+
+  // SHA-256 of "auditId:ruleId:url" — enables idempotent upserts on re-runs
+  fingerprint String @unique
+
+  page AuditedPage? @relation(fields: [pageId], references: [id], onDelete: Cascade)
+
+  @@index([auditId, category])
+  @@index([auditId, severity])
+  @@index([pageId])
+  @@index([fingerprint])
+}
+
+// One Recommendation per failing rule per audit (not one per page).
+// Linked to Issues via (auditId, ruleId) at query time.
+model Recommendation {
+  id      String @id @default(cuid())
+  auditId String
+  ruleId  String
+
+  title               String
+  summary             String
+  whyItMatters        String
+  implementationSteps Json    // string[]
+  exampleFix          String?
+
+  impact String // "HIGH" | "MEDIUM" | "LOW"
+  effort String // "HIGH" | "MEDIUM" | "LOW"
+  priority Int    // lower = fix first
+
+  affectedPageCount Int   @default(0)
+  totalScoreImpact  Float @default(0)
+  affectedUrls      Json  @default("[]") // string[] (capped at 20 for display)
+
+  audit Audit @relation(fields: [auditId], references: [id], onDelete: Cascade)
+
+  @@unique([auditId, ruleId])
+  @@index([auditId, priority])
+}
+
+// Sitewide per-category score (one row per category per audit).
+model CategoryScore {
+  id         String        @id @default(cuid())
+  auditId    String
+  category   IssueCategory
+  score      Float
+  maxScore   Float         @default(100)
+  issueCount Int
+
+  audit Audit @relation(fields: [auditId], references: [id], onDelete: Cascade)
+
+  @@unique([auditId, category])
+  @@index([auditId])
+}
+
+// Per-page per-category score (excludes sitewide rules).
+model PageCategoryScore {
+  id       String        @id @default(cuid())
+  pageId   String
+  category IssueCategory
+  score    Float
+  maxScore Float         @default(100)
+
+  page AuditedPage @relation(fields: [pageId], references: [id], onDelete: Cascade)
+
+  @@unique([pageId, category])
+  @@index([pageId])
+}
