@@ -34,7 +34,7 @@ export function PagesTable({ pages, auditId }: Props) {
       setSortDir((d) => (d === "asc" ? "desc" : "asc"));
     } else {
       setSortKey(key);
-      setSortDir(key === "url" ? "asc" : "asc");
+      setSortDir(key === "url" ? "asc" : "desc");
     }
   }
 

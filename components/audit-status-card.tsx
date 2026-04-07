@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Loader2, CheckCircle2, XCircle, Clock } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
@@ -30,32 +30,42 @@ interface Props {
 export function AuditStatusCard({ auditId, onComplete }: Props) {
   const [status, setStatus] = useState<AuditStatusResponse | null>(null);
   const [error, setError] = useState(false);
-
-  const poll = useCallback(async () => {
-    try {
-      const res = await fetch(`/api/audits/${auditId}?view=status`);
-      if (!res.ok) { setError(true); return; }
-      const data: AuditStatusResponse = await res.json();
-      setStatus(data);
-      if (data.status === "COMPLETE" || data.status === "FAILED") {
-        onComplete?.(data);
-      }
-    } catch {
-      setError(true);
-    }
-  }, [auditId, onComplete]);
+  // Keep onComplete stable — use a ref so the effect never needs it as a dep.
+  const onCompleteRef = useRef(onComplete);
+  onCompleteRef.current = onComplete;
 
   useEffect(() => {
-    poll();
-    const interval = setInterval(() => {
-      if (status?.status === "COMPLETE" || status?.status === "FAILED") {
-        clearInterval(interval);
-        return;
+    let cancelled = false;
+
+    async function poll() {
+      try {
+        const res = await fetch(`/api/audits/${auditId}?view=status`);
+        if (!res.ok) {
+          if (!cancelled) setError(true);
+          return;
+        }
+        const data: AuditStatusResponse = await res.json();
+        if (cancelled) return;
+
+        setStatus(data);
+
+        if (data.status === "COMPLETE" || data.status === "FAILED") {
+          onCompleteRef.current?.(data);
+          clearInterval(interval);
+        }
+      } catch {
+        if (!cancelled) setError(true);
       }
-      poll();
-    }, 3000);
-    return () => clearInterval(interval);
-  }, [poll, status?.status]);
+    }
+
+    poll(); // immediate first fetch
+    const interval = setInterval(poll, 3000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [auditId]); // only restart if the auditId changes
 
   const currentStatus = status?.status ?? "PENDING";
   const progress = STATUS_PROGRESS[currentStatus];
@@ -67,9 +77,7 @@ export function AuditStatusCard({ auditId, onComplete }: Props) {
         <CardTitle className="text-base flex items-center gap-2">
           {currentStatus === "COMPLETE" ? (
             <CheckCircle2 className="h-5 w-5 text-green-500" />
-          ) : currentStatus === "FAILED" ? (
-            <XCircle className="h-5 w-5 text-destructive" />
-          ) : error ? (
+          ) : currentStatus === "FAILED" || error ? (
             <XCircle className="h-5 w-5 text-destructive" />
           ) : (
             <Loader2 className="h-5 w-5 animate-spin text-primary" />
@@ -105,7 +113,7 @@ export function AuditStatusCard({ auditId, onComplete }: Props) {
           </p>
         )}
 
-        {!isTerminal && (
+        {!isTerminal && !error && (
           <p className="text-xs text-muted-foreground flex items-center gap-1">
             <Clock className="h-3 w-3" />
             Refreshing every 3 seconds…

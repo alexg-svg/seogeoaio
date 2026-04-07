@@ -1,7 +1,5 @@
 "use client";
 
-import { ExternalLink } from "lucide-react";
-import Link from "next/link";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { SeverityBadge } from "@/components/severity-badge";
 import { EmptyState } from "@/components/empty-state";
@@ -19,12 +17,9 @@ const CATEGORY_LABELS: Record<IssueCategory, string> = {
 interface Props {
   issues: Issue[];
   title?: string;
-  showUrl?: boolean;
-  auditId?: string;
-  pageIdMap?: Record<string, string>; // url → pageId
 }
 
-export function IssuesList({ issues, title = "Issues", showUrl, auditId, pageIdMap }: Props) {
+export function IssuesList({ issues, title = "Issues" }: Props) {
   if (issues.length === 0) {
     return (
       <Card>
@@ -50,8 +45,11 @@ export function IssuesList({ issues, title = "Issues", showUrl, auditId, pageIdM
       </CardHeader>
       <CardContent className="p-0">
         <div className="divide-y">
-          {issues.map((issue) => (
-            <div key={issue.id ?? issue.ruleId} className="flex items-start gap-3 p-4 hover:bg-muted/30 transition-colors">
+          {issues.map((issue, idx) => (
+            <div
+              key={issue.id ?? `${issue.ruleId}-${idx}`}
+              className="flex items-start gap-3 p-4 hover:bg-muted/30 transition-colors"
+            >
               <div className="flex-shrink-0 pt-0.5">
                 <SeverityBadge severity={issue.severity} />
               </div>
@@ -68,14 +66,6 @@ export function IssuesList({ issues, title = "Issues", showUrl, auditId, pageIdM
                   )}
                 </div>
                 <p className="text-sm text-muted-foreground mt-0.5">{issue.detail}</p>
-                {showUrl && auditId && pageIdMap && (issue as { pageUrl?: string }).pageUrl && (
-                  <Link
-                    href={`/audits/${auditId}/pages/${pageIdMap[(issue as { pageUrl?: string }).pageUrl!]}`}
-                    className="text-xs text-primary hover:underline mt-1 flex items-center gap-0.5"
-                  >
-                    View page <ExternalLink className="h-3 w-3" />
-                  </Link>
-                )}
               </div>
               {issue.scoreImpact > 0 && (
                 <span className="flex-shrink-0 text-xs font-medium text-destructive tabular-nums">

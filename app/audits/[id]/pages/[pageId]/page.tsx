@@ -284,14 +284,16 @@ function Shell({
             <ArrowLeft className="h-4 w-4" />
           </Link>
           <h1 className="text-base font-semibold truncate font-mono">{shortTitle}</h1>
-          <a
-            href={title.startsWith("http") ? title : undefined}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-muted-foreground hover:text-foreground transition-colors"
-          >
-            <ExternalLink className="h-3.5 w-3.5" />
-          </a>
+          {title.startsWith("http") && (
+            <a
+              href={title}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-muted-foreground hover:text-foreground transition-colors"
+            >
+              <ExternalLink className="h-3.5 w-3.5" />
+            </a>
+          )}
         </div>
         {children}
       </main>

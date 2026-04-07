@@ -1,7 +1,8 @@
+"use client";
+
 import { ChevronDown, ChevronUp } from "lucide-react";
 import { useState } from "react";
 import { Card, CardContent } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import type { Recommendation } from "@/lib/api-types";
 
